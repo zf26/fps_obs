@@ -70,6 +70,7 @@ endif()
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${onnxruntime_INCLUDE_DIR}")
 
 # Copy ONNX Runtime DLLs (including GPU/DML providers) to output and rundir
+# Only copy provider DLLs if they actually exist (GPU package has CUDA but not DML)
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
@@ -77,31 +78,44 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
     "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
-    "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
-    "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_tensorrt.dll"
-    "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_tensorrt.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_dml.dll"
-    "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_dml.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
-  COMMENT "Copying ONNX Runtime DLLs (CUDA, TensorRT, DirectML) to build output"
 )
+
+# Copy shared provider DLL if it exists
+if(EXISTS "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll")
+  add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
+      "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
+      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
+  )
+endif()
+
+# Copy CUDA provider DLL if it exists
+if(EXISTS "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll")
+  add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
+      "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
+      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
+  )
+endif()
+
+# Copy DirectML provider DLL if it exists (CPU package has DML but not CUDA)
+if(EXISTS "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_dml.dll")
+  add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_dml.dll"
+      "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_dml.dll"
+      "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/"
+  )
+endif()
+
+message(STATUS "ONNX Runtime DLLs will be copied to build output")
 
 message(STATUS "ONNX Runtime: ${onnxruntime_INCLUDE_DIR}")

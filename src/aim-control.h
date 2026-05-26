@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <windows.h>
 
 // Aim target selection modes
 enum aim_target_mode {
@@ -35,6 +36,8 @@ struct aim_config {
 	bool show_crosshair;
 };
 
+struct yolo_inference;
+
 // Aim control handle
 struct aim_control *aim_control_create(void);
 
@@ -43,6 +46,14 @@ void aim_control_destroy(struct aim_control *ac);
 void aim_control_set_config(struct aim_control *ac, struct aim_config config);
 
 struct aim_config aim_control_get_config(struct aim_control *ac);
+
+// Attach a YOLO inference engine to this aim control.
+// The timer thread will capture the screen and run inference on it.
+void aim_control_attach_inference(struct aim_control *ac, struct yolo_inference *inference);
+
+// Set the screen capture interval in ms.
+// Lower values = more responsive but higher CPU usage (default: 33ms ~30fps).
+void aim_control_set_capture_interval(struct aim_control *ac, int interval_ms);
 
 // Calculate the aim point for a detection.
 // Returns normalized screen coordinates (0-1).

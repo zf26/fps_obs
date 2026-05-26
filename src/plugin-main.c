@@ -19,24 +19,25 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-module.h>
 #include <plugin-support.h>
 #include "plugin-main.h"
-#include "obs-aimbot-source.h"
 #include "yolo-inference.h"
+#include <windows.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 bool obs_module_load(void)
 {
+	obs_log(LOG_INFO, "PLUGIN BUILD: %s %s", __DATE__, __TIME__);
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 
-	obs_register_source(&aimbot_source_info);
-	obs_log(LOG_INFO, "FPS Aimbot source registered (id: %s)", aimbot_source_info.id);
+	register_filter();
+	obs_log(LOG_INFO, "FPS Aimbot filter registered");
 
 	return true;
 }
 
 void obs_module_unload(void)
 {
-	yolo_inference_shutdown();
 	obs_log(LOG_INFO, "plugin unloaded");
+	yolo_inference_shutdown();
 }

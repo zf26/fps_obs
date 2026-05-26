@@ -45,7 +45,11 @@ typedef const OrtApiBase *(ORT_API_CALL *OrtGetApiBase_t)(void);
 /* Global API — populated from OrtGetApiBase */
 static const OrtApi *g_ort = NULL;
 static HMODULE g_ort_dll = NULL;
-static OrtEnv *g_env = NULL;
+
+/* One OrtEnv per provider — avoids CUDA/DML context conflicts.
+ * CUDA and CPU are mutually exclusive on most systems anyway. */
+static OrtEnv *g_env_cuda = NULL;
+static OrtEnv *g_env_cpu = NULL;
 
 /* Pre-load provider DLLs so onnxruntime.dll can resolve them */
 static void preload_provider_dlls(const wchar_t *dir)
@@ -53,7 +57,6 @@ static void preload_provider_dlls(const wchar_t *dir)
 	const wchar_t *names[] = {
 		L"onnxruntime_providers_shared.dll",
 		L"onnxruntime_providers_cuda.dll",
-		L"onnxruntime_providers_tensorrt.dll",
 	};
 	for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
 		wchar_t path[512];
@@ -67,10 +70,8 @@ static void preload_provider_dlls(const wchar_t *dir)
 	}
 }
 
-/* Load CUDA / TensorRT providers (exported as DLL symbols) */
+/* Load CUDA / DML provider append functions (exported as DLL symbols) */
 static OrtStatus *(ORT_API_CALL *g_OrtSessionOptionsAppendExecutionProvider_CUDA)(
-	OrtSessionOptions *, const char *const *) = NULL;
-static OrtStatus *(ORT_API_CALL *g_OrtSessionOptionsAppendExecutionProvider_Tensorrt)(
 	OrtSessionOptions *, const char *const *) = NULL;
 static OrtStatus *(ORT_API_CALL *g_OrtSessionOptionsAppendExecutionProvider_DML)(
 	OrtSessionOptions *, const char *const *) = NULL;
@@ -83,6 +84,7 @@ static bool init_ort_if_needed(void)
 
 	/* Priority: 1) hardcoded GPU path, 2) ONNXRUNTIME_DIR env var */
 	const wchar_t *candidates[] = {
+		L"D:\\onnxruntime-win-x64-gpu-1.25.1\\lib\\onnxruntime.dll",
 		L"D:\\onnxruntime-win-x64-gpu-1.20.1\\lib\\onnxruntime.dll",
 	};
 	for (int i = 0; i < (int)(sizeof(candidates) / sizeof(candidates[0])); i++) {
@@ -105,7 +107,7 @@ static bool init_ort_if_needed(void)
 	if (!ort_dll_path[0]) {
 		obs_log(LOG_ERROR,
 			"ONNX Runtime GPU DLL not found. "
-			"Please install onnxruntime-win-x64-gpu-1.20.1 at D:\\ or set ONNXRUNTIME_DIR.");
+			"Please install onnxruntime-win-x64-gpu at D:\\ or set ONNXRUNTIME_DIR.");
 		return false;
 	}
 
@@ -151,8 +153,6 @@ static bool init_ort_if_needed(void)
 	/* Load provider append functions (exported directly from onnxruntime.dll) */
 	g_OrtSessionOptionsAppendExecutionProvider_CUDA = (decltype(g_OrtSessionOptionsAppendExecutionProvider_CUDA))
 		GetProcAddress(g_ort_dll, "OrtSessionOptionsAppendExecutionProvider_CUDA");
-	g_OrtSessionOptionsAppendExecutionProvider_Tensorrt = (decltype(g_OrtSessionOptionsAppendExecutionProvider_Tensorrt))
-		GetProcAddress(g_ort_dll, "OrtSessionOptionsAppendExecutionProvider_Tensorrt");
 	g_OrtSessionOptionsAppendExecutionProvider_DML = (decltype(g_OrtSessionOptionsAppendExecutionProvider_DML))
 		GetProcAddress(g_ort_dll, "OrtSessionOptionsAppendExecutionProvider_DML");
 
@@ -160,25 +160,48 @@ static bool init_ort_if_needed(void)
 	return true;
 }
 
-static OrtEnv *get_ort_env(void)
+/* Get ORT env for a specific provider. CUDA/DML use their own envs. */
+static OrtEnv *get_ort_env_for_provider(const char *provider)
 {
-	if (g_env) return g_env;
 	if (!g_ort) return NULL;
-	OrtStatus *st = g_ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "fps-aimbot", &g_env);
-	if (st || !g_env) {
-		obs_log(LOG_ERROR, "Failed to create ONNX Runtime env");
-		return NULL;
+
+	if (strcmp(provider, "CUDA") == 0 || strcmp(provider, "DirectML") == 0) {
+		if (g_env_cuda) return g_env_cuda;
+		OrtStatus *st = g_ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "fps-aimbot-gpu", &g_env_cuda);
+		if (st || !g_env_cuda) {
+			obs_log(LOG_ERROR, "Failed to create ONNX Runtime GPU env");
+			if (st) {
+				const char *msg = g_ort->GetErrorMessage(st);
+				if (msg) obs_log(LOG_ERROR, "ORT error: %s", msg);
+				g_ort->ReleaseStatus(st);
+			}
+			g_env_cuda = NULL;
+			return NULL;
+		}
+		return g_env_cuda;
 	}
-	return g_env;
+
+	/* CPU fallback */
+	if (g_env_cpu) return g_env_cpu;
+	OrtStatus *st = g_ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "fps-aimbot-cpu", &g_env_cpu);
+	if (st) {
+		obs_log(LOG_ERROR, "Failed to create ONNX Runtime CPU env");
+		const char *msg = g_ort->GetErrorMessage(st);
+		if (msg) obs_log(LOG_ERROR, "ORT error: %s", msg);
+		g_ort->ReleaseStatus(st);
+		g_env_cpu = NULL;
+	}
+	return g_env_cpu;
 }
 
 static void shutdown_ort(void)
 {
+	if (g_env_cuda) { g_ort->ReleaseEnv(g_env_cuda); g_env_cuda = NULL; }
+	if (g_env_cpu)  { g_ort->ReleaseEnv(g_env_cpu);  g_env_cpu = NULL; }
 	if (g_ort_dll) {
 		FreeLibrary(g_ort_dll);
 		g_ort_dll = NULL;
 		g_ort = NULL;
-		g_env = NULL;
 	}
 }
 
@@ -245,15 +268,15 @@ struct yolo_inference *yolo_inference_create(const char *model_path,
 	MultiByteToWideChar(CP_UTF8, 0, model_path, -1, &wpath[0], wlen);
 	wpath.resize((size_t)wlen - 1);
 	const ORTCHAR_T *model_path_w = wpath.c_str();
-#else
-	const ORTCHAR_T *model_path_w = model_path;
 #endif
 
-	/* Try providers in order: CUDA -> TensorRT -> DML -> CPU */
+	/* Try providers in order: CUDA -> DirectML -> CPU.
+	 * GPU providers are tried first for best inference performance.
+	 * If a GPU provider fails (DLL missing, no compatible GPU), falls back to CPU. */
 	OrtSession *sess = nullptr;
 	const char *provider_name = nullptr;
 
-	/* CUDA */
+	/* CUDA — fastest option on NVIDIA GPUs */
 	if (!sess) {
 		OrtSessionOptions *opts = nullptr;
 		OrtStatus *st = ort->CreateSessionOptions(&opts);
@@ -266,40 +289,27 @@ struct yolo_inference *yolo_inference_create(const char *model_path,
 				st = ort->CreateStatus(ORT_INVALID_ARGUMENT, "CUDA provider not available");
 			}
 			if (!st) {
-				st = ort->CreateSession(get_ort_env(), model_path_w, opts, &sess);
-				if (!st && sess) {
-					provider_name = "CUDA";
-					obs_log(LOG_INFO, "Using CUDA execution provider");
+				OrtEnv *env = get_ort_env_for_provider("CUDA");
+				if (env) {
+					st = ort->CreateSession(env, model_path_w, opts, &sess);
+				} else {
+					st = ort->CreateStatus(ORT_INVALID_ARGUMENT, "CUDA env unavailable");
 				}
+			}
+			if (!st && sess) {
+				provider_name = "CUDA";
+				obs_log(LOG_INFO, "Using CUDA execution provider");
+			} else if (st) {
+				const char *err = ort->GetErrorMessage(st);
+				obs_log(LOG_WARNING, "CUDA provider init failed: %s",
+					err ? err : "unknown");
+				ort->ReleaseStatus(st);
 			}
 			ort->ReleaseSessionOptions(opts);
 		}
 	}
 
-	/* TensorRT */
-	if (!sess) {
-		OrtSessionOptions *opts = nullptr;
-		OrtStatus *st = ort->CreateSessionOptions(&opts);
-		if (!st && opts) {
-			ort->SetIntraOpNumThreads(opts, 0);
-			ort->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_EXTENDED);
-			if (g_OrtSessionOptionsAppendExecutionProvider_Tensorrt) {
-				st = g_OrtSessionOptionsAppendExecutionProvider_Tensorrt(opts, NULL);
-			} else {
-				st = ort->CreateStatus(ORT_INVALID_ARGUMENT, "TensorRT provider not available");
-			}
-			if (!st) {
-				st = ort->CreateSession(get_ort_env(), model_path_w, opts, &sess);
-				if (!st && sess) {
-					provider_name = "TensorRT";
-					obs_log(LOG_INFO, "Using TensorRT execution provider");
-				}
-			}
-			ort->ReleaseSessionOptions(opts);
-		}
-	}
-
-	/* DirectML */
+	/* DirectML — Windows-native GPU acceleration (works on AMD/Intel/NVIDIA) */
 	if (!sess) {
 		OrtSessionOptions *opts = nullptr;
 		OrtStatus *st = ort->CreateSessionOptions(&opts);
@@ -312,30 +322,45 @@ struct yolo_inference *yolo_inference_create(const char *model_path,
 				st = ort->CreateStatus(ORT_INVALID_ARGUMENT, "DML provider not available");
 			}
 			if (!st) {
-				st = ort->CreateSession(get_ort_env(), model_path_w, opts, &sess);
-				if (!st && sess) {
-					provider_name = "DirectML";
-					obs_log(LOG_INFO, "Using DirectML execution provider");
+				OrtEnv *env = get_ort_env_for_provider("DirectML");
+				if (env) {
+					st = ort->CreateSession(env, model_path_w, opts, &sess);
+				} else {
+					st = ort->CreateStatus(ORT_INVALID_ARGUMENT, "DML env unavailable");
 				}
+			}
+			if (!st && sess) {
+				provider_name = "DirectML";
+				obs_log(LOG_INFO, "Using DirectML execution provider");
+			} else if (st) {
+				const char *err = ort->GetErrorMessage(st);
+				obs_log(LOG_WARNING, "DirectML provider init failed: %s",
+					err ? err : "unknown");
+				ort->ReleaseStatus(st);
 			}
 			ort->ReleaseSessionOptions(opts);
 		}
 	}
 
-	/* CPU fallback */
+	/* CPU fallback — always works, fast enough for 256x256 YOLO at 30fps */
 	if (!sess) {
 		OrtSessionOptions *opts = nullptr;
 		OrtStatus *st = ort->CreateSessionOptions(&opts);
 		if (!st && opts) {
-			ort->SetIntraOpNumThreads(opts, 0);
+			ort->SetIntraOpNumThreads(opts, 6);
 			ort->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_EXTENDED);
-			st = ort->CreateSession(get_ort_env(), model_path_w, opts, &sess);
+			st = ort->CreateSession(get_ort_env_for_provider("CPU"), model_path_w, opts, &sess);
 			ort->ReleaseSessionOptions(opts);
 			if (!st && sess) {
 				provider_name = "CPU";
-				obs_log(LOG_INFO, "Using CPU execution provider (fallback)");
+				obs_log(LOG_INFO, "Using CPU execution provider (6 threads)");
 			} else {
-				obs_log(LOG_ERROR, "CPU fallback also failed");
+				obs_log(LOG_ERROR, "All inference providers failed");
+				if (st) {
+					const char *err = ort->GetErrorMessage(st);
+					obs_log(LOG_ERROR, "Last ORT error: %s", err ? err : "unknown");
+					ort->ReleaseStatus(st);
+				}
 				delete yi;
 				return nullptr;
 			}
@@ -693,6 +718,15 @@ bool yolo_inference_run(struct yolo_inference *yi,
 	yi->last_result.count = 0;
 
 	if (detection_count > 0) {
+		obs_log(LOG_INFO, "[YOLO] Raw detections before NMS: %d", detection_count);
+		for (int i = 0; i < detection_count; i++) {
+			obs_log(LOG_INFO, "  [raw %d] class=%d (%s), conf=%.3f, box=[%.1f, %.1f, %.1f, %.1f]",
+				i, yi->class_buffer[i], coco_class_name(yi->class_buffer[i]),
+				yi->score_buffer[i],
+				yi->box_buffer[i * 4], yi->box_buffer[i * 4 + 1],
+				yi->box_buffer[i * 4 + 2], yi->box_buffer[i * 4 + 3]);
+		}
+
 		std::vector<int> sorted(detection_count);
 		for (int i = 0; i < detection_count; i++) sorted[i] = i;
 		std::sort(sorted.begin(), sorted.end(),
@@ -737,6 +771,14 @@ bool yolo_inference_run(struct yolo_inference *yi,
 				sizeof(det.class_name) - 1);
 			det.class_name[sizeof(det.class_name) - 1] = '\0';
 			yi->last_result.count++;
+		}
+
+		obs_log(LOG_INFO, "[YOLO] Final detections after NMS: %d", yi->last_result.count);
+		for (int i = 0; i < yi->last_result.count; i++) {
+			auto &d = yi->last_result.detections[i];
+			obs_log(LOG_INFO, "  [det %d] class=%d (%s), conf=%.3f, center=[%.3f, %.3f], size=[%.3f, %.3f]",
+				i, d.class_id, d.class_name, d.confidence,
+				d.x, d.y, d.width, d.height);
 		}
 	}
 

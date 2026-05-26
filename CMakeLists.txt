@@ -12,8 +12,8 @@ include(compilerconfig)
 include(defaults)
 include(helpers)
 
-# Enable C++17 for ONNX Runtime
-set(CMAKE_CXX_STANDARD 17)
+# Enable C++20 for designated initializers and modern features
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
@@ -39,11 +39,6 @@ if(ENABLE_QT)
   )
 endif()
 
-# Windows-specific: DirectX for screen capture
-if(WIN32)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE dxgi d3d11 dxguid)
-endif()
-
 # ONNX Runtime for YOLO inference
 option(ENABLE_ENEMY_DETECTION "Enable enemy detection with ONNX Runtime" ON)
 if(ENABLE_ENEMY_DETECTION)
@@ -53,16 +48,14 @@ endif()
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/plugin-main.c
   src/plugin-main.h
-  src/screen-capture.h
-  src/screen-capture.c
   src/yolo-inference.h
   src/yolo-inference.cpp
   src/aim-control.h
   src/aim-control.c
-  src/enemy-detector.h
-  src/enemy-detector.c
-  src/obs-aimbot-source.h
-  src/obs-aimbot-source.c
+  src/aimbot-filter.h
+  src/obs-aimbot-filter.cpp
+  src/screen-capture.h
+  src/screen-capture.cpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
